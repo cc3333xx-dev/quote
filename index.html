@@ -75,6 +75,7 @@ input[type=file]{display:none}
 <script src="xlsx.full.min.js"></script>
 <script src="exceljs.min.js"></script>
 <script src="jspdf.umd.min.js"></script>
+<script src="jspdf.autotable.min.js"></script>
 <script src="html2canvas.min.js"></script>
 </head>
 <body>
@@ -106,8 +107,15 @@ input[type=file]{display:none}
 
     <div class="param-row">
       <div class="param-item"><label>$ 汇率 (RMB→USD)</label><input type="number" id="exRate" value="6.75" step="0.01"></div>
-      <div class="param-item"><label>◎ 起订量 (Sets)</label><input type="number" id="moq" value="50" min="1"></div>
+      <div class="param-item"><label>🔢 统一数量（留空用各行数量）</label><input type="number" id="uniQty" min="1" placeholder="例如 7"></div>
       <div class="param-item"><label>📅 有效期 (天)</label><input type="number" id="validity" value="7" min="1"></div>
+    </div>
+    <div class="param-row" id="mixBatchRow" style="display:none;">
+      <div class="param-item"><label>📦 混批总数量</label><input type="number" id="mixTotal" min="1" placeholder="例如 200"></div>
+      <div class="param-item" style="display:flex;align-items:center;gap:8px;">
+        <button class="btn-action" onclick="applyMixBatch()" style="background:linear-gradient(135deg,#ed8936,#dd6b20);font-size:13px;padding:8px 16px;">🔀 应用混批分配</button>
+        <span id="mixBatchHint" style="font-size:12px;color:#718096;"></span>
+      </div>
     </div>
     <div class="param-row">
       <div class="param-item"><label>🕐 交货期</label><input type="text" id="delivery" value="7-15 Working Days"></div>
@@ -116,15 +124,31 @@ input[type=file]{display:none}
       <div class="param-item"><label>💳 付款条款</label><input type="text" id="payment" value="50% Deposit, Balance Before Shipment"></div>
     </div>
 
+    <div class="section-title" style="margin-top:20px;border-top:1px solid #edf2f7;padding-top:16px">📋 客户信息（PI 形式发票用，留空不填）</div>
+    <div class="param-row">
+      <div class="param-item" style="flex:2"><label>🏢 客户名称</label><input type="text" id="buyerName" placeholder="Company Name"></div>
+      <div class="param-item"><label>📞 电话</label><input type="text" id="buyerTel" placeholder="TEL"></div>
+    </div>
+    <div class="param-row">
+      <div class="param-item" style="flex:2"><label>📍 客户地址</label><input type="text" id="buyerAddr" placeholder="Customer Address"></div>
+      <div class="param-item"><label>📠 传真</label><input type="text" id="buyerFax" value="N/A" placeholder="FAX"></div>
+    </div>
+
     <div class="action-bar">
       <button class="btn-action btn-clear" onclick="clearAll()">🗑 清空</button>
       <button class="btn-action btn-download" onclick="downloadQuotation()" style="background:linear-gradient(135deg,#63b3ed,#4299e1)">⬇ 下载 Excel</button>
-      <button class="btn-action btn-pdf" onclick="exportPDF()" style="flex:1.2">📄 直接导出PDF（完美格式）</button>
+      <button class="btn-action btn-pdf" onclick="exportPDF()" style="flex:0.8">📄 报价单 PDF</button>
+      <button class="btn-action btn-pdf" onclick="exportPI_PDF()" style="background:linear-gradient(135deg,#9f7aea,#805ad5);flex:0.9">🧾 形式发票 PI</button>
     </div>
   </div>
 
   <div class="quotation-section" id="qSection" style="display:none;">
     <div class="quotation-card" id="qCard"></div>
+  </div>
+
+  <!-- PI 预览区（可选显示） -->
+  <div class="quotation-section" id="piSection" style="display:none;margin-top:24px;">
+    <div style="text-align:center;font-size:13px;color:#38a169;margin-bottom:8px;">✅ Proforma Invoice 已就绪，点击「形式发票 PI」导出PDF</div>
   </div>
 </div>
 
@@ -153,14 +177,81 @@ function setP(p) {
   buildQuotation();
 }
 
+// 混批平均分配：将总数量均匀分配到各SKU（整数，余数依次给前面的）
+function applyMixBatch() {
+  var text = document.getElementById('skuInput').value.trim();
+  if (!text) { alert('请先输入SKU编号！'); return; }
+  var entries = text.split('\n').filter(function(l){return l.trim()}).map(function(l){return l.trim().split(/[\s\t]+/)[0].toUpperCase()}).filter(function(s){return s});
+  var count = entries.length;
+  if (count === 0) { alert('请先输入SKU编号！'); return; }
+
+  var total = parseInt(document.getElementById('mixTotal').value);
+  if (!total || total < 1) { alert('请输入有效的混批总数量！'); return; }
+
+  var base = Math.floor(total / count);
+  var remainder = total % count;
+  if (base === 0 && remainder < count) {
+    // 总数不够分，每人至少1个
+    var result = [];
+    for (var i = 0; i < count; i++) {
+      result.push(i < Math.min(remainder > 0 ? remainder : 0, total) ? 1 : 0);
+    }
+    // 重新分配：前 remainder 个 +1，最后 remainder 个凑满 total
+    var dist = distributeEvenly(count, total);
+    var newText = dist.map(function(item, i) { return entries[i] + '\t' + item; }).join('\n');
+    document.getElementById('skuInput').value = newText;
+    document.getElementById('uniQty').value = '';
+    buildQuotation();
+    return;
+  }
+
+  // 正常分配：前 remainder 个多得 1
+  var dist = [];
+  for (var i = 0; i < count; i++) {
+    dist.push(i < remainder ? base + 1 : base);
+  }
+  var sum = dist.reduce(function(a, b){return a+b}, 0);
+  // 如果有余数分配导致和不对，微调最后一个
+  if (sum !== total) {
+    dist[0] += (total - sum);
+  }
+
+  var newText = dist.map(function(item, i) { return entries[i] + '\t' + item; }).join('\n');
+  document.getElementById('skuInput').value = newText;
+  // 清空统一数量，避免冲突
+  document.getElementById('uniQty').value = '';
+  buildQuotation();
+}
+
+// 通用均匀分配算法
+function distributeEvenly(count, total) {
+  var base = Math.floor(total / count);
+  var rem = total % count;
+  var result = [];
+  for (var i = 0; i < count; i++) {
+    result.push(i < rem ? base + 1 : base);
+  }
+  return result;
+}
+
 function parseSKUs() {
   var text = document.getElementById('skuInput').value.trim();
   if (!text) return [];
-  var moq = parseInt(document.getElementById('moq').value) || 50;
+  var uniQtyInp = document.getElementById('uniQty').value.trim();
+  var useUniQty = uniQtyInp !== '' && parseInt(uniQtyInp) > 0;
+  var uniQty = useUniQty ? parseInt(uniQtyInp) : null;
+  var defaultQty = 50;
   return text.split('\n').filter(function(l){return l.trim()}).map(function(line) {
     var parts = line.trim().split(/[\s\t]+/);
     var sku = parts[0].toUpperCase();
-    var qty = parseInt(parts[1]) || moq;
+    var qty;
+    if (useUniQty) {
+      qty = uniQty;
+    } else if (parts[1] && parseInt(parts[1]) > 0) {
+      qty = parseInt(parts[1]);
+    } else {
+      qty = defaultQty;
+    }
     return { sku: sku, qty: qty };
   }).filter(function(x){return x.sku});
 }
@@ -175,14 +266,21 @@ function renderSKUList() {
     return;
   }
   container.style.display = 'block';
-  var html = '<div class="sku-list-title">📋 已添加 ' + quotationItems.length + ' 个SKU（修改数量后自动重新报价）</div>';
+  var uniQtyVal = document.getElementById('uniQty').value.trim();
+  var isUni = uniQtyVal !== '' && parseInt(uniQtyVal) > 0;
+  var modeLabel = isUni ? '（统一数量：' + uniQtyVal + '）' : '（修改数量后自动重新报价）';
+  var html = '<div class="sku-list-title">📋 已添加 ' + quotationItems.length + ' 个SKU ' + modeLabel + '</div>';
   quotationItems.forEach(function(item, idx) {
     var found = item.unitPrice !== null;
     html += '<div class="sku-item">' +
       '<span class="sku-name">' + esc(item.model) + (found ? '' : ' ❌') + '</span>' +
-      '<span class="sku-qty-label">数量：</span>' +
-      '<input class="sku-qty-input" type="number" min="1" value="' + item.qty + '" data-idx="' + idx + '">' +
-      (found ? '<span class="sku-price">$' + item.unitPrice.toFixed(2) + '</span>' : '') +
+      '<span class="sku-qty-label">数量：</span>';
+    if (isUni) {
+      html += '<span style="font-size:14px;font-weight:600;padding:5px 10px">' + item.qty + '</span>';
+    } else {
+      html += '<input class="sku-qty-input" type="number" min="1" value="' + item.qty + '" data-idx="' + idx + '">';
+    }
+    html += (found ? '<span class="sku-price">$' + item.unitPrice.toFixed(2) + '</span>' : '') +
       '</div>';
   });
   container.innerHTML = html;
@@ -264,8 +362,10 @@ function buildQuotation() {
   // 渲染可编辑的SKU列表
   renderSKUList();
   // 绑定SKU数量修改事件（事件委托）
-  bindSKUListEvents();
-  document.getElementById('qSection').scrollIntoView({ behavior: 'smooth' });
+  if (document.getElementById('uniQty').value.trim() === '') {
+    bindSKUListEvents();
+  }
+  // 不自动滚动，用户自己查看
 }
 
 function esc(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -277,52 +377,106 @@ function exportPDF() {
   if (quotationItems.length === 0) { alert('请先输入SKU编号！'); return; }
   if (document.getElementById('qSection').style.display === 'none') { alert('请先生成报价单预览'); return; }
 
-  var qCard = document.getElementById('qCard');
-  
-  // 使用html2canvas捕获内容区域
-  html2canvas(qCard, {
-    scale: 2,               // 2倍分辨率，内容清晰
-    useCORS: true,
-    backgroundColor: '#ffffff',
-    logging: false
-  }).then(function(canvas) {
-    var imgData = canvas.toDataURL('image/png');
-    var imgWidth = canvas.width;
-    var imgHeight = canvas.height;
-    
-    // A4 宽595.28pt，按内容比例计算
-    var pdfWidth = 595.28;
-    var pdfHeight = (imgHeight * pdfWidth) / imgWidth;
-    
-    var { jsPDF } = window.jspdf;
-    var pdf = new jsPDF('p', 'pt', 'a4');
-    
-    // 如果内容高度超过A4，分页
-    var pageHeight = 841.89;  // A4 height in pt
-    var heightLeft = pdfHeight;
-    var position = 0;
-    var imgHeightOnPdf = pdfWidth * (imgHeight / imgWidth);
-    
-    // 第一页
-    pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeightOnPdf);
-    heightLeft -= pageHeight;
-    
-    // 后续页
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeightOnPdf;
-      pdf.addPage();
-      pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, imgHeightOnPdf);
-      heightLeft -= pageHeight;
-    }
-    
-    // 下载文件
-    var now = new Date();
-    var qNo = 'Q' + now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
-    pdf.save(qNo + '.pdf');
-  }).catch(function(err) {
-    console.error('PDF export failed:', err);
-    alert('PDF导出失败，请重试！');
+  var delivery = document.getElementById('delivery').value;
+  var payment = document.getElementById('payment').value;
+  var validity = document.getElementById('validity').value;
+  var now = new Date();
+  var dateStr = now.getFullYear() + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0');
+  var qNo = 'Q' + now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+
+  var { jsPDF } = window.jspdf;
+  var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  var pageW = 210, pageH = 297;
+  var margin = 15;
+  var contentW = pageW - margin * 2;
+  var y = margin;
+
+  // 标题
+  pdf.setFontSize(18);
+  pdf.setFont(undefined, 'bold');
+  pdf.text('QUOTATION', pageW / 2, y, { align: 'center' });
+  y += 12;
+
+  // 元信息（键值对）
+  var meta = [
+    ['Currency:', 'USD'],
+    ['Customer:', ''],
+    ['Quotation Date:', dateStr],
+    ['Quotation No.:', qNo]
+  ];
+  pdf.setFontSize(11);
+  meta.forEach(function(m) {
+    pdf.setFont(undefined, 'bold');
+    pdf.text(m[0], margin, y);
+    pdf.setFont(undefined, 'normal');
+    pdf.text(m[1], margin + 35, y);
+    y += 8;
   });
+  y += 5;
+
+  // 产品表格（使用autotable自动分页，不会切断文字）
+  var tableData = [];
+  quotationItems.forEach(function(item) {
+    if (item.unitPrice !== null) {
+      tableData.push([item.model, item.qty, item.unitPrice.toFixed(2), item.subtotal.toFixed(2)]);
+    } else {
+      tableData.push([item.model, item.qty, 'N/A', 'N/A']);
+    }
+  });
+
+  var totalQty = 0, grandTotal = 0;
+  quotationItems.forEach(function(item) { totalQty += item.qty; if (item.subtotal) grandTotal += item.subtotal; });
+
+  pdf.autoTable({
+    startY: y,
+    head: [['Model', 'Qty', 'Unit Price', 'Subtotal']],
+    body: tableData,
+    theme: 'grid',
+    styles: { fontSize: 11, cellPadding: 3, halign: 'right', valign: 'middle' },
+    columnStyles: { 0: { halign: 'left', cellWidth: contentW * 0.38 }, 1: { cellWidth: contentW * 0.14 }, 2: { cellWidth: contentW * 0.24 }, 3: { cellWidth: contentW * 0.24 } },
+    headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold', fontSize: 11 }
+  });
+
+  y = pdf.lastAutoTable.finalY + 6;
+
+  // Order Quantity & Total 行
+  pdf.setFontSize(11);
+  pdf.setFont(undefined, 'bold');
+  pdf.text('Order Quantity:', margin + contentW * 0.52, y);
+  pdf.setFont(undefined, 'normal');
+  pdf.text(totalQty + ' Sets', margin + contentW * 0.76, y);
+  y += 8;
+  pdf.setFont(undefined, 'bold');
+  pdf.text('Total:', margin + contentW * 0.52, y);
+  pdf.setFont(undefined, 'normal');
+  pdf.text(grandTotal.toFixed(2) + ' USD', margin + contentW * 0.76, y);
+  y += 12;
+
+  // 底部信息表
+  var info = [
+    ['Payment Method:', 'T/T Bank Transfer (Bank details will be provided upon order confirmation)'],
+    ['Payment Terms:', payment],
+    ['Item Details', 'Details'],
+    ['Packaging:', 'Standard Packaging (OEM Available)'],
+    ['Lead Time:', delivery],
+    ['Quotation Validity:', validity + ' Days'],
+    ['Delivery Method:', 'Sea / Air / Express DHL / FedEx'],
+    ['Port of Loading:', 'Ningbo / Shenzhen'],
+    ['Price Basis:', 'FOB China (Sea freight basis)'],
+    ['Shipping Cost:', 'Included in FOB price'],
+    ['WhatsApp:', '+86 155 2901 1024'],
+    ['Email:', 'jerry1001333@gmail.com']
+  ];
+
+  pdf.autoTable({
+    startY: y,
+    body: info,
+    theme: 'grid',
+    styles: { fontSize: 9.5, cellPadding: 3, valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: { 0: { cellWidth: contentW * 0.32, fontStyle: 'bold', fillColor: [249, 249, 249] }, 1: { cellWidth: contentW * 0.68 } }
+  });
+
+  pdf.save(qNo + '.pdf');
 }
 
 // ====== 下载Excel - 使用ExcelJS ======
@@ -592,13 +746,201 @@ document.getElementById('skuInput').addEventListener('input', function() {
   _debounceTimer = setTimeout(function() {
     var skus = document.getElementById('skuInput').value.trim();
     if (skus.length > 0) {
+      // 显示混批行
+      var entries = skus.split('\n').filter(function(l){return l.trim()}).map(function(l){return l.trim().split(/[\s\t]+/)[0]}).filter(function(s){return s});
+      var count = entries.length;
+      document.getElementById('mixBatchRow').style.display = count > 1 ? 'flex' : 'none';
+      document.getElementById('mixBatchHint').textContent = count > 1 ? count + ' 个SKU（填混批总数量→应用）' : '';
       buildQuotation();
     } else {
       document.getElementById('qSection').style.display = 'none';
+      document.getElementById('mixBatchRow').style.display = 'none';
       renderSKUList();
     }
   }, 500);
 });
+
+// 统一数量/汇率等参数变化时自动重新报价
+['uniQty','exRate','validity','delivery','payment'].forEach(function(id) {
+  document.getElementById(id).addEventListener('input', function() {
+    // uniQty 变化时清空混批
+    if (id === 'uniQty') {
+      document.getElementById('mixTotal').value = '';
+    }
+    clearTimeout(_debounceTimer);
+    _debounceTimer = setTimeout(function() {
+      if (document.getElementById('skuInput').value.trim()) {
+        buildQuotation();
+      }
+    }, 400);
+  });
+});
+
+// ====== 导出形式发票 PI (Proforma Invoice) ======
+function exportPI_PDF() {
+  if (quotationItems.length === 0) { alert('请先输入SKU编号！'); return; }
+
+  var delivery = document.getElementById('delivery').value;
+  var payment = document.getElementById('payment').value;
+  var buyerName = document.getElementById('buyerName').value.trim() || '';
+  var buyerAddr = document.getElementById('buyerAddr').value.trim() || '';
+  var buyerTel = document.getElementById('buyerTel').value.trim() || '';
+  var buyerFax = document.getElementById('buyerFax').value.trim() || 'N/A';
+  var now = new Date();
+  var dateStr = now.getFullYear() + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0');
+  var piNo = now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+
+  var { jsPDF } = window.jspdf;
+  var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  var pageW = 210, pageH = 297;
+  var margin = 14;
+  var contentW = pageW - margin * 2;
+  var y = margin;
+
+  // ====== 标题：Proforma Invoice（顶部居中） ======
+  pdf.setFontSize(18);
+  pdf.setFont(undefined, 'bold');
+  pdf.text('Proforma Invoice', pageW / 2, y, { align: 'center' });
+  y += 12;
+
+  // ====== SELLER 区域：公司名称 / 地址 分行独立框 ======
+  var sellerAddr = 'Room 303, Inside Dongyang Shenghui Craft Furniture Factory, No.160 Huashui North Road, Fenghuang Community, Jiangbei Subdistrict, Dongyang City, Jinhua City, Zhejiang Province, China';
+
+  pdf.autoTable({
+    startY: y,
+    body: [
+      ['SELLER:', 'Dongyang Dija Crafts Co., Ltd.'],
+      ['Address:', sellerAddr]
+    ],
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3, valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: {
+      0: { fontStyle: 'bold', fillColor: [245, 245, 245], cellWidth: contentW * 0.16 },
+      1: { cellWidth: contentW * 0.84 }
+    }
+  });
+  y = pdf.lastAutoTable.finalY;
+
+  // ====== BUYER 区域：名称 / 电话 / 地址 / FAX 各自独立框 ======
+  var buyerRows = [
+    ['BUYER:', buyerName || ''],
+    ['TEL:', buyerTel || ''],
+    ['Address:', buyerAddr || ''],
+    ['FAX:', buyerFax]
+  ];
+
+  pdf.autoTable({
+    startY: y,
+    body: buyerRows,
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3, valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: {
+      0: { fontStyle: 'bold', fillColor: [245, 245, 245], cellWidth: contentW * 0.16 },
+      1: { cellWidth: contentW * 0.84 }
+    }
+  });
+  y = pdf.lastAutoTable.finalY;
+
+  // ====== Date 独立行 ======
+  pdf.autoTable({
+    startY: y,
+    body: [
+      ['Date:', dateStr],
+      ['Contract No.:', piNo]
+    ],
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 3, valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: {
+      0: { fontStyle: 'bold', fillColor: [245, 245, 245], cellWidth: contentW * 0.16 },
+      1: { cellWidth: contentW * 0.84 }
+    }
+  });
+  y = pdf.lastAutoTable.finalY;
+
+  // ====== 合同说明行 ======
+  pdf.autoTable({
+    startY: y,
+    body: [['This contract is made by and agreed between the Buyer and Seller, in accordance with the terms and conditions stipulated below.']],
+    theme: 'grid',
+    styles: { fontSize: 8.5, cellPadding: 3, lineColor: [0, 0, 0], lineWidth: 0.3 }
+  });
+  y = pdf.lastAutoTable.finalY + 3;
+
+  // ====== 产品明细表 ======
+  var tableData = [];
+  quotationItems.forEach(function(item) {
+    if (item.unitPrice !== null) {
+      tableData.push([item.model, item.qty, item.unitPrice.toFixed(2), item.subtotal.toFixed(2)]);
+    } else {
+      tableData.push([item.model, item.qty, 'N/A', 'N/A']);
+    }
+  });
+
+  var totalQty = 0, grandTotal = 0;
+  quotationItems.forEach(function(item) { totalQty += item.qty; if (item.subtotal) grandTotal += item.subtotal; });
+
+  pdf.autoTable({
+    startY: y,
+    head: [['Model', 'Qty', 'Unit Price', 'Price']],
+    body: tableData,
+    theme: 'grid',
+    styles: { fontSize: 10, cellPadding: 3, halign: 'right', valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: { 0: { halign: 'left', cellWidth: contentW * 0.35 }, 1: { cellWidth: contentW * 0.15 }, 2: { cellWidth: contentW * 0.25 }, 3: { cellWidth: contentW * 0.25 } },
+    headStyles: { fillColor: [240, 240, 240], textColor: [0, 0, 0], fontStyle: 'bold', fontSize: 10 }
+  });
+
+  // Total 汇总行
+  var totalRow = [['Total', totalQty + ' Sets', '', grandTotal.toFixed(2) + ' USD']];
+  pdf.autoTable({
+    startY: pdf.lastAutoTable.finalY,
+    body: totalRow,
+    theme: 'grid',
+    styles: { fontSize: 10, cellPadding: 3, halign: 'right', valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3, fontStyle: 'bold' },
+    columnStyles: { 0: { halign: 'left', cellWidth: contentW * 0.35 }, 1: { cellWidth: contentW * 0.15 }, 2: { cellWidth: contentW * 0.25 }, 3: { cellWidth: contentW * 0.25 } }
+  });
+  y = pdf.lastAutoTable.finalY + 3;
+
+  // ====== 底部条款表（6-15项） ======
+  var infoData = [
+    ['6.Total Value', grandTotal.toFixed(2) + ' USD'],
+    ['7.Packing', 'Standard packaging\n24 pcs / box, including nail tips, jelly glue, nail file and alcohol pad.'],
+    ['8.Shipping Marks', 'N/M'],
+    ['9.Time of Shipment', delivery],
+    ['10.Means of Transportation', 'By air / By sea'],
+    ['11.Port of Loading & Destination', 'Port of Loading: Zhejiang, China\nPort of Destination: '],
+    ['12.Insurance', 'Not included'],
+    ['13.Terms of Payment', payment],
+    ['14.Remarks', "This bank account is our designated receiving account through XTransfer for international business payments.\nPlease write Buyer\\'s Name + PI No. + Product Name in the payment remark."],
+    ['15.Bank Details:', 'Beneficiary Name: Huizhou Huifan Internet Technology Co Ltd\nAccount Number: 63004294883\nBank Name: JPMorgan Chase Bank N.A., Hong Kong Branch\nSWIFT/BIC: CHASHKHH\nBank Address: 18/F, 20/F, 22-29/F, Chater House, 8 Connaught Road Central, Hong Kong\nCountry/Region: Hong Kong, China\nPayment Method: SWIFT / TT\nCurrency: USD']
+  ];
+
+  pdf.autoTable({
+    startY: y,
+    body: infoData,
+    theme: 'grid',
+    styles: { fontSize: 8.5, cellPadding: 2.5, valign: 'top', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: [249, 249, 249], cellWidth: contentW * 0.3 }, 1: { cellWidth: contentW * 0.7 } }
+  });
+  y = pdf.lastAutoTable.finalY + 4;
+
+  // ====== 签名区 ======
+  pdf.autoTable({
+    startY: y,
+    body: [
+      ['The Buyer (Signature)', 'The Seller (Signature and stamp)'],
+      ['', 'Dongyang Dija Crafts Co., Ltd.'],
+      ['', 'Authorized by: Jerry'],
+      ['', ''],
+      ['', ''],
+      ['Date: _______________', 'Date: ' + dateStr]
+    ],
+    theme: 'grid',
+    styles: { fontSize: 9, cellPadding: 4, valign: 'middle', lineColor: [0, 0, 0], lineWidth: 0.3 },
+    columnStyles: { 0: { cellWidth: contentW * 0.5 }, 1: { cellWidth: contentW * 0.5 } }
+  });
+
+  pdf.save('PI_' + piNo + '.pdf');
+}
 </script>
 </body>
 </html>
