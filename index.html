@@ -70,11 +70,55 @@ input[type=file]{display:none}
   .action-bar{display:none !important}
 }
 @media(max-width:600px){.card{padding:18px 16px 24px}.param-row{flex-direction:column;gap:10px}.action-bar{flex-direction:column}.quotation-card{padding:20px}}
-</style>
+
+    /* 标签切换栏 */
+    .tab-bar {
+      display: flex;
+      gap: 0;
+      margin: 20px 0 12px 0;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      background: #f7fafc;
+      color: #718096;
+      cursor: pointer;
+      transition: all 0.2s;
+      border-bottom: 3px solid transparent;
+    }
+    .tab-btn:first-child {
+      border-radius: 8px 0 0 0;
+    }
+    .tab-btn:last-child {
+      border-radius: 0 8px 0 0;
+    }
+    .tab-btn:hover {
+      background: #edf2f7;
+      color: #4a5568;
+    }
+    .tab-btn.active {
+      background: #fff;
+      color: #4299e1;
+      border-bottom: 3px solid #4299e1;
+    }
+    /* 缩小Excel按钮 */
+    .btn-download-small {
+      background: linear-gradient(135deg, #63b3ed, #4299e1) !important;
+      font-size: 12px !important;
+      padding: 6px 12px !important;
+      flex: 0.6 !important;
+    }
+
+  </style>
 <!-- 本地库，无需网页服务器 -->
 <script src="xlsx.full.min.js"></script>
 <script src="exceljs.min.js"></script>
 <script src="jspdf.umd.min.js"></script>
+<script src="https://unpkg.com/docx@8.2.0/build/index.umd.min.js"></script>
 <script src="jspdf.autotable.min.js"></script>
 <script src="html2canvas.min.js"></script>
 </head>
@@ -106,7 +150,7 @@ input[type=file]{display:none}
     </div>
 
     <div class="param-row">
-      <div class="param-item"><label>$ 汇率 (RMB→USD)</label><input type="number" id="exRate" value="6.75" step="0.01"></div>
+      <div class="param-item"><label>$ 汇率 (1 USD = ? RMB)</label><input type="number" id="exRate" value="7.0" step="0.01"></div>
       <div class="param-item"><label>🔢 统一数量（留空用各行数量）</label><input type="number" id="uniQty" min="1" placeholder="例如 7"></div>
       <div class="param-item"><label>📅 有效期 (天)</label><input type="number" id="validity" value="7" min="1"></div>
     </div>
@@ -136,10 +180,17 @@ input[type=file]{display:none}
 
     <div class="action-bar">
       <button class="btn-action btn-clear" onclick="clearAll()">🗑 清空</button>
-      <button class="btn-action btn-download" onclick="downloadQuotation()" style="background:linear-gradient(135deg,#63b3ed,#4299e1)">⬇ 下载 Excel</button>
+      <button class="btn-action btn-download btn-download-small" onclick="downloadQuotation()">⬇ Excel</button>
       <button class="btn-action btn-pdf" onclick="exportPDF()" style="flex:0.8">📄 报价单 PDF</button>
+      <button class="btn-action" onclick="downloadPI_Word()" style="background:linear-gradient(135deg,#48bb78,#38a169);font-size:13px;padding:8px 14px;flex:0.8">📥 PI Word</button>
       <button class="btn-action btn-pdf" onclick="exportPI_PDF()" style="background:linear-gradient(135deg,#9f7aea,#805ad5);flex:0.9">🧾 形式发票 PI</button>
     </div>
+  </div>
+
+  <!-- 标签切换预览 -->
+  <div class="tab-bar" id="tabBar" style="display:none;">
+    <button class="tab-btn" id="tabQuotation" onclick="showTab('quotation')">📋 报价单预览</button>
+    <button class="tab-btn" id="tabPI" onclick="showTab('pi')">🧾 PI 预览</button>
   </div>
 
   <div class="quotation-section" id="qSection" style="display:none;">
@@ -234,6 +285,337 @@ function distributeEvenly(count, total) {
   return result;
 }
 
+// 标签切换显示
+var currentTab = null;
+function showTab(tab) {
+  if (currentTab === tab) {
+    // 再次点击同一标签，隐藏预览
+    currentTab = null;
+    document.getElementById('qSection').style.display = 'none';
+    document.getElementById('piSection').style.display = 'none';
+    document.getElementById('tabQuotation').classList.remove('active');
+    document.getElementById('tabPI').classList.remove('active');
+    return;
+  }
+  currentTab = tab;
+  if (tab === 'quotation') {
+    document.getElementById('qSection').style.display = 'block';
+    document.getElementById('piSection').style.display = 'none';
+    document.getElementById('tabQuotation').classList.add('active');
+    document.getElementById('tabPI').classList.remove('active');
+  } else if (tab === 'pi') {
+    document.getElementById('qSection').style.display = 'none';
+    document.getElementById('piSection').style.display = 'block';
+    document.getElementById('tabPI').classList.add('active');
+    document.getElementById('tabQuotation').classList.remove('active');
+    // 触发PI预览HTML生成
+    buildPIPreview();
+  }
+}
+
+// 下载 PI 为 Word 文档（.docx格式，可用Word/WPS打开编辑）
+async function downloadPI_Word() {
+  if (quotationItems.length === 0) { alert('请先输入SKU编号！'); return; }
+  if (typeof docx === 'undefined') { alert('Word库加载中，请稍后再试！'); return; }
+
+  var delivery = document.getElementById('delivery').value;
+  var payment = document.getElementById('payment').value;
+  var buyerName = document.getElementById('buyerName').value.trim() || '';
+  var buyerAddr = document.getElementById('buyerAddr').value.trim() || '';
+  var buyerTel = document.getElementById('buyerTel').value.trim() || '';
+  var buyerFax = document.getElementById('buyerFax').value.trim() || 'N/A';
+  var now = new Date();
+  var dateStr = now.getFullYear() + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0');
+  var piNo = now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+
+  var totalQty = 0, grandTotal = 0;
+  quotationItems.forEach(function(item) { totalQty += item.qty; if (item.subtotal) grandTotal += item.subtotal; });
+
+  var sellerAddr = 'Room 303, Inside Dongyang Shenghui Craft Furniture Factory, No.160 Huashui North Road, Fenghuang Community, Jiangbei Subdistrict, Dongyang City, Jinhua City, Zhejiang Province, China';
+
+  const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType, AlignmentType,
+          BorderStyle, HeadingLevel, convertInchesToTwip } = docx;
+
+  function cell(text, opts) {
+    opts = opts || {};
+    return new TableCell({
+      children: [new Paragraph({ children: [new TextRun({ text: String(text), bold: !!opts.bold, size: 20, font: 'Arial' })] })],
+      width: opts.width ? { size: opts.width, type: WidthType.PERCENTAGE } : undefined,
+      shading: opts.shading ? { fill: opts.shading } : undefined,
+      borders: { top: {style: BorderStyle.SINGLE, size: 1}, bottom: {style: BorderStyle.SINGLE, size: 1},
+                 left: {style: BorderStyle.SINGLE, size: 1}, right: {style: BorderStyle.SINGLE, size: 1} }
+    });
+  }
+
+  // Product table rows
+  var productRows = [
+    new TableRow({ children: [cell('Model', {bold:true, shading:'F0F0F0', width:35}), cell('Qty', {bold:true, shading:'F0F0F0', width:15}), cell('Unit Price (USD)', {bold:true, shading:'F0F0F0', width:25}), cell('Price (USD)', {bold:true, shading:'F0F0F0', width:25})] })
+  ];
+  quotationItems.forEach(function(item) {
+    if (item.unitPrice !== null) {
+      productRows.push(new TableRow({ children: [
+        cell(item.model, {width:35}), cell(String(item.qty), {width:15}),
+        cell(item.unitPrice.toFixed(2), {width:25}), cell(item.subtotal.toFixed(2), {width:25})
+      ]}));
+    }
+  });
+  productRows.push(new TableRow({ children: [
+    cell('Total', {bold:true, width:35}), cell(totalQty + ' Sets', {bold:true, width:15}), cell('', {width:25}), cell(grandTotal.toFixed(2) + ' USD', {bold:true, width:25})
+  ]}));
+
+  // Info table rows
+  var infoData = [
+    ['6.Total Value', grandTotal.toFixed(2) + ' USD'],
+    ['7.Packing', 'Standard packaging. 24 pcs / box, including nail tips, jelly glue, nail file and alcohol pad.'],
+    ['8.Shipping Marks', 'N/M'],
+    ['9.Time of Shipment', delivery],
+    ['10.Means of Transportation', 'By air / By sea'],
+    ['11.Port of Loading & Destination', 'Port of Loading: Zhejiang, China\nPort of Destination: '],
+    ['12.Insurance', 'Not included'],
+    ['13.Terms of Payment', payment],
+    ['14.Remarks', "Please write Buyer's Name + PI No. + Product Name in the payment remark."],
+    ['15.Bank Details:', 'Beneficiary Name: Huizhou Huifan Internet Technology Co Ltd\nAccount Number: 63004294883\nBank Name: JPMorgan Chase Bank N.A., Hong Kong Branch\nSWIFT/BIC: CHASHKHH\nBank Address: 18/F Chater House, 8 Connaught Road Central, Hong Kong\nCountry/Region: Hong Kong, China\nPayment Method: SWIFT / TT\nCurrency: USD']
+  ];
+  var infoTableRows = infoData.map(function(row) {
+    return new TableRow({ children: [
+      cell(row[0], {bold:true, width:30, shading:'F9F9F9'}), cell(row[1], {width:70})
+    ]});
+  });
+
+  var doc = new Document({
+    sections: [{
+      properties: { page: { margin: { top: convertInchesToTwip(0.75), bottom: convertInchesToTwip(0.75),
+        left: convertInchesToTwip(0.75), right: convertInchesToTwip(0.75) } } },
+      children: [
+        new Paragraph({ heading: HeadingLevel.HEADING_1, alignment: AlignmentType.CENTER,
+          children: [new TextRun({ text: 'Proforma Invoice', bold: true, size: 32, font: 'Arial' })] }),
+        new Paragraph({ children: [] }),
+
+        new Table({ rows: [
+          new TableRow({ children: [cell('SELLER:', {bold:true, width:16, shading:'F5F5F5'}), cell('Dongyang Dija Crafts Co., Ltd.', {width:84})] }),
+          new TableRow({ children: [cell('Address:', {bold:true, width:16, shading:'F5F5F5'}), cell(sellerAddr, {width:84})] })
+        ], width: { size: 100, type: WidthType.PERCENTAGE }}),
+        new Paragraph({ children: [] }),
+
+        new Table({ rows: [
+          new TableRow({ children: [cell('BUYER:', {bold:true, width:16, shading:'F5F5F5'}), cell(buyerName || '', {width:84})] }),
+          new TableRow({ children: [cell('TEL:', {bold:true, width:16, shading:'F5F5F5'}), cell(buyerTel || '', {width:84})] }),
+          new TableRow({ children: [cell('Address:', {bold:true, width:16, shading:'F5F5F5'}), cell(buyerAddr || '', {width:84})] }),
+          new TableRow({ children: [cell('FAX:', {bold:true, width:16, shading:'F5F5F5'}), cell(buyerFax, {width:84})] })
+        ], width: { size: 100, type: WidthType.PERCENTAGE }}),
+        new Paragraph({ children: [] }),
+
+        new Table({ rows: [
+          new TableRow({ children: [cell('Date:', {bold:true, width:16, shading:'F5F5F5'}), cell(dateStr, {width:84})] }),
+          new TableRow({ children: [cell('Contract No.:', {bold:true, width:16, shading:'F5F5F5'}), cell(piNo, {width:84})] })
+        ], width: { size: 100, type: WidthType.PERCENTAGE }}),
+
+        new Paragraph({ spacing: { before: 200 }, children: [new TextRun({ text: 'This contract is made by and agreed between the Buyer and Seller, in accordance with the terms and conditions stipulated below.', size: 18, font: 'Arial' })] }),
+
+        new Table({ rows: productRows, width: { size: 100, type: WidthType.PERCENTAGE } }),
+        new Paragraph({ children: [] }),
+
+        new Table({ rows: infoTableRows, width: { size: 100, type: WidthType.PERCENTAGE } }),
+        new Paragraph({ children: [] }),
+
+        new Table({ rows: [
+          new TableRow({ children: [
+            new TableCell({ children: [
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'The Buyer (Signature)', size: 20, font: 'Arial' })] }),
+              new Paragraph({ children: [] }), new Paragraph({ children: [] }),
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Date: _______________', size: 20, font: 'Arial' })] })
+            ], width: { size: 50, type: WidthType.PERCENTAGE } }),
+            new TableCell({ children: [
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'The Seller (Signature and stamp)', size: 20, font: 'Arial' })] }),
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Dongyang Dija Crafts Co., Ltd.', size: 20, font: 'Arial' })] }),
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Authorized by: Jerry', size: 20, font: 'Arial' })] }),
+              new Paragraph({ children: [] }),
+              new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: 'Date: ' + dateStr, size: 20, font: 'Arial' })] })
+            ], width: { size: 50, type: WidthType.PERCENTAGE } })
+          ]})
+        ], width: { size: 100, type: WidthType.PERCENTAGE } })
+      ]
+    }]
+  });
+
+  var blob = await Packer.toBlob(doc);
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'PI_' + piNo + '.docx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+} {
+  if (quotationItems.length === 0) { alert('请先输入SKU编号！'); return; }
+
+  var delivery = document.getElementById('delivery').value;
+  var payment = document.getElementById('payment').value;
+  var buyerName = document.getElementById('buyerName').value.trim() || '';
+  var buyerAddr = document.getElementById('buyerAddr').value.trim() || '';
+  var buyerTel = document.getElementById('buyerTel').value.trim() || '';
+  var buyerFax = document.getElementById('buyerFax').value.trim() || 'N/A';
+  var now = new Date();
+  var dateStr = now.getFullYear() + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0');
+  var piNo = now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+
+  var totalQty = 0, grandTotal = 0;
+  quotationItems.forEach(function(item) { totalQty += item.qty; if (item.subtotal) grandTotal += item.subtotal; });
+
+  var sellerAddr = 'Room 303, Inside Dongyang Shenghui Craft Furniture Factory, No.160 Huashui North Road, Fenghuang Community, Jiangbei Subdistrict, Dongyang City, Jinhua City, Zhejiang Province, China';
+
+  // 生成 HTML 内容（Word可以打开HTML文件）
+  var html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">';
+  html += '<head><meta charset="utf-8"><title>Proforma Invoice</title>';
+  html += '<style>body{font-family:Arial,sans-serif;margin:20px}table{border-collapse:collapse;width:100%;margin:10px 0}th,td{border:1px solid #000;padding:6px;text-align:left}th{background:#f0f0f0;font-weight:bold}.right{text-align:right}.center{text-align:center}</style>';
+  html += '</head><body>';
+  html += '<h1 style="text-align:center">Proforma Invoice</h1>';
+  
+  // SELLER
+  html += '<table><tr><td style="width:16%;font-weight:bold;background:#f5f5f5">SELLER:</td><td style="width:84%">Dongyang Dija Crafts Co., Ltd.</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5">Address:</td><td>' + sellerAddr + '</td></tr></table>';
+  
+  // BUYER
+  html += '<table><tr><td style="width:16%;font-weight:bold;background:#f5f5f5">BUYER:</td><td style="width:84%">' + (buyerName || '') + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5">TEL:</td><td>' + (buyerTel || '') + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5">Address:</td><td>' + (buyerAddr || '') + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5">FAX:</td><td>' + buyerFax + '</td></tr></table>';
+  
+  // Date & Contract No
+  html += '<table><tr><td style="width:16%;font-weight:bold;background:#f5f5f5">Date:</td><td style="width:84%">' + dateStr + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5">Contract No.:</td><td>' + piNo + '</td></tr></table>';
+  
+  // 说明
+  html += '<p style="font-size:12px;margin:10px 0">This contract is made by and agreed between the Buyer and Seller, in accordance with the terms and conditions stipulated below.</p>';
+  
+  // 产品表
+  html += '<table><thead><tr><th>Model</th><th>Qty</th><th>Unit Price (USD)</th><th>Price (USD)</th></tr></thead><tbody>';
+  quotationItems.forEach(function(item) {
+    if (item.unitPrice !== null) {
+      html += '<tr><td>' + item.model + '</td><td class="right">' + item.qty + '</td><td class="right">' + item.unitPrice.toFixed(2) + '</td><td class="right">' + item.subtotal.toFixed(2) + '</td></tr>';
+    } else {
+      html += '<tr><td>' + item.model + '</td><td class="right">' + item.qty + '</td><td>N/A</td><td>N/A</td></tr>';
+    }
+  });
+  html += '<tr style="font-weight:bold"><td>Total</td><td class="right">' + totalQty + ' Sets</td><td></td><td class="right">' + grandTotal.toFixed(2) + ' USD</td></tr>';
+  html += '</tbody></table>';
+  
+  // 条款
+  var infoData = [
+    ['6.Total Value', grandTotal.toFixed(2) + ' USD'],
+    ['7.Packing', 'Standard packaging<br>24 pcs / box, including nail tips, jelly glue, nail file and alcohol pad.'],
+    ['8.Shipping Marks', 'N/M'],
+    ['9.Time of Shipment', delivery],
+    ['10.Means of Transportation', 'By air / By sea'],
+    ['11.Port of Loading & Destination', 'Port of Loading: Zhejiang, China<br>Port of Destination: '],
+    ['12.Insurance', 'Not included'],
+    ['13.Terms of Payment', payment],
+    ['14.Remarks', 'Please write Buyer\'s Name + PI No. + Product Name in the payment remark.'],
+    ['15.Bank Details:', 'Beneficiary Name: Huizhou Huifan Internet Technology Co Ltd<br>Account Number: 63004294883<br>Bank Name: JPMorgan Chase Bank N.A., Hong Kong Branch<br>SWIFT/BIC: CHASHKHH<br>Bank Address: 18/F, 20/F, 22-29/F, Chater House, 8 Connaught Road Central, Hong Kong<br>Country/Region: Hong Kong, China<br>Payment Method: SWIFT / TT<br>Currency: USD']
+  ];
+  html += '<table>';
+  infoData.forEach(function(row) {
+    html += '<tr><td style="width:30%;font-weight:bold;background:#f9f9f9;vertical-align:top">' + row[0] + '</td><td style="width:70%">' + row[1] + '</td></tr>';
+  });
+  html += '</table>';
+  
+  // 签名
+  html += '<table style="margin-top:20px"><tr><td style="width:50%;text-align:center">The Buyer (Signature)<br><br><br>Date: _______________</td>';
+  html += '<td style="width:50%;text-align:center">The Seller (Signature and stamp)<br>Dongyang Dija Crafts Co., Ltd.<br>Authorized by: Jerry<br><br>Date: ' + dateStr + '</td></tr></table>';
+  
+  html += '</body></html>';
+
+  // 下载为 .doc 文件
+  var blob = new Blob(['﻿' + html], { type: 'application/msword' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'PI_' + piNo + '.doc';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// 生成完整 PI 预览 HTML（在piSection中显示）
+function buildPIPreview() {
+  if (quotationItems.length === 0) return;
+  var delivery = document.getElementById('delivery').value;
+  var payment = document.getElementById('payment').value;
+  var buyerName = document.getElementById('buyerName').value.trim() || '';
+  var buyerAddr = document.getElementById('buyerAddr').value.trim() || '';
+  var buyerTel = document.getElementById('buyerTel').value.trim() || '';
+  var buyerFax = document.getElementById('buyerFax').value.trim() || 'N/A';
+  var now = new Date();
+  var dateStr = now.getFullYear() + '/' + String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0');
+  var piNo = now.toISOString().slice(0,10).replace(/-/g,'') + '-' + String(Math.floor(Math.random()*900)+100);
+  var totalQty = 0, grandTotal = 0;
+  quotationItems.forEach(function(item) { totalQty += item.qty; if (item.subtotal) grandTotal += item.subtotal; });
+  var sellerAddr = 'Room 303, Inside Dongyang Shenghui Craft Furniture Factory, No.160 Huashui North Road, Fenghuang Community, Jiangbei Subdistrict, Dongyang City, Jinhua City, Zhejiang Province, China';
+  
+  var html = '<div style="font-family:Arial,sans-serif;padding:16px;max-width:800px;margin:0 auto;background:#fff">';
+  html += '<h2 style="text-align:center;font-size:18px;font-weight:bold;margin-bottom:14px">Proforma Invoice</h2>';
+  
+  html += '<table style="width:100%;border-collapse:collapse;margin:8px 0"><tr><td style="width:16%;font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">SELLER:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">Dongyang Dija Crafts Co., Ltd.</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">Address:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + sellerAddr + '</td></tr></table>';
+  
+  html += '<table style="width:100%;border-collapse:collapse;margin:8px 0"><tr><td style="width:16%;font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">BUYER:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + esc(buyerName) + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">TEL:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + esc(buyerTel) + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">Address:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + esc(buyerAddr) + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">FAX:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + esc(buyerFax) + '</td></tr></table>';
+  
+  html += '<table style="width:100%;border-collapse:collapse;margin:8px 0"><tr><td style="width:16%;font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">Date:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + dateStr + '</td></tr>';
+  html += '<tr><td style="font-weight:bold;background:#f5f5f5;border:1px solid #ccc;padding:5px 8px;font-size:13px">Contract No.:</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + piNo + '</td></tr></table>';
+  
+  html += '<p style="font-size:11px;margin:10px 0;color:#555">This contract is made by and agreed between the Buyer and Seller, in accordance with the terms and conditions stipulated below.</p>';
+  
+  html += '<table style="width:100%;border-collapse:collapse;margin:8px 0"><thead><tr style="background:#f0f0f0">';
+  html += '<th style="border:1px solid #ccc;padding:5px 8px;font-size:13px;text-align:left">Model</th>';
+  html += '<th style="border:1px solid #ccc;padding:5px 8px;font-size:13px;text-align:right;width:15%">Qty</th>';
+  html += '<th style="border:1px solid #ccc;padding:5px 8px;font-size:13px;text-align:right;width:22%">Unit Price (USD)</th>';
+  html += '<th style="border:1px solid #ccc;padding:5px 8px;font-size:13px;text-align:right;width:23%">Price (USD)</th>';
+  html += '</tr></thead><tbody>';
+  quotationItems.forEach(function(item) {
+    if (item.unitPrice !== null) {
+      html += '<tr><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">' + item.model + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:13px">' + item.qty + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:13px">$' + item.unitPrice.toFixed(2) + '</td>';
+      html += '<td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:13px">$' + item.subtotal.toFixed(2) + '</td></tr>';
+    }
+  });
+  html += '<tr style="font-weight:bold;background:#fafafa"><td style="border:1px solid #ccc;padding:5px 8px;font-size:13px">Total</td>';
+  html += '<td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:13px">' + totalQty + ' Sets</td>';
+  html += '<td style="border:1px solid #ccc;padding:5px 8px;font-size:13px"></td>';
+  html += '<td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:13px">$' + grandTotal.toFixed(2) + ' USD</td></tr>';
+  html += '</tbody></table>';
+  
+  var infoData = [
+    ['6.Total Value', '$' + grandTotal.toFixed(2) + ' USD'],
+    ['7.Packing', 'Standard packaging. 24 pcs / box, including nail tips, jelly glue, nail file and alcohol pad.'],
+    ['8.Shipping Marks', 'N/M'],
+    ['9.Time of Shipment', delivery],
+    ['10.Means of Transportation', 'By air / By sea'],
+    ['11.Port of Loading & Destination', 'Port of Loading: Zhejiang, China<br>Port of Destination: '],
+    ['12.Insurance', 'Not included'],
+    ['13.Terms of Payment', payment],
+    ['14.Remarks', "Please write Buyer's Name + PI No. + Product Name in the payment remark."],
+    ['15.Bank Details:', 'Beneficiary Name: Huizhou Huifan Internet Technology Co Ltd<br>Account Number: 63004294883<br>Bank Name: JPMorgan Chase Bank N.A., Hong Kong Branch<br>SWIFT/BIC: CHASHKHH<br>Bank Address: 18/F Chater House, 8 Connaught Road Central, Hong Kong<br>Country/Region: Hong Kong, China<br>Payment Method: SWIFT / TT<br>Currency: USD']
+  ];
+  html += '<table style="width:100%;border-collapse:collapse;margin:8px 0">';
+  infoData.forEach(function(row) {
+    html += '<tr><td style="width:28%;font-weight:bold;background:#f9f9f9;border:1px solid #ccc;padding:5px 8px;font-size:12px;vertical-align:top">' + row[0] + '</td><td style="border:1px solid #ccc;padding:5px 8px;font-size:12px">' + row[1] + '</td></tr>';
+  });
+  html += '</table>';
+  
+  html += '<table style="width:100%;border-collapse:collapse;margin-top:16px"><tr>';
+  html += '<td style="width:50%;text-align:center;border:1px solid #ccc;padding:10px;font-size:13px">The Buyer (Signature)<br><br><br>Date: _______________</td>';
+  html += '<td style="width:50%;text-align:center;border:1px solid #ccc;padding:10px;font-size:13px">The Seller (Signature and stamp)<br>Dongyang Dija Crafts Co., Ltd.<br>Authorized by: Jerry<br><br>Date: ' + dateStr + '</td>';
+  html += '</tr></table></div>';
+  
+  document.getElementById('piSection').innerHTML = html;
+}
+
 function parseSKUs() {
   var text = document.getElementById('skuInput').value.trim();
   if (!text) return [];
@@ -290,7 +672,7 @@ function buildQuotation() {
   var entries = parseSKUs();
   if (entries.length === 0) { document.getElementById('qSection').style.display='none'; return; }
 
-  var rate = parseFloat(document.getElementById('exRate').value) || 6.75;
+  var rate = parseFloat(document.getElementById('exRate').value) || 7.0;
   var pf = profitRate / 100;
 
   quotationItems = [];
@@ -358,14 +740,7 @@ function buildQuotation() {
   html += '</tbody></table>';
 
   document.getElementById('qCard').innerHTML = html;
-  document.getElementById('qSection').style.display = 'block';
-  // 渲染可编辑的SKU列表
-  renderSKUList();
-  // 绑定SKU数量修改事件（事件委托）
-  if (document.getElementById('uniQty').value.trim() === '') {
-    bindSKUListEvents();
-  }
-  // 不自动滚动，用户自己查看
+  // 不管理标签/预览显示，由事件处理器统一控制
 }
 
 function esc(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
@@ -746,33 +1121,49 @@ document.getElementById('skuInput').addEventListener('input', function() {
   _debounceTimer = setTimeout(function() {
     var skus = document.getElementById('skuInput').value.trim();
     if (skus.length > 0) {
-      // 显示混批行
+      // 显示混批行、标签栏和报价单预览
       var entries = skus.split('\n').filter(function(l){return l.trim()}).map(function(l){return l.trim().split(/[\s\t]+/)[0]}).filter(function(s){return s});
       var count = entries.length;
       document.getElementById('mixBatchRow').style.display = count > 1 ? 'flex' : 'none';
       document.getElementById('mixBatchHint').textContent = count > 1 ? count + ' 个SKU（填混批总数量→应用）' : '';
+      // 显示标签栏和默认报价单预览
+      document.getElementById('tabBar').style.display = 'flex';
+      if (currentTab === null || currentTab === 'quotation') {
+        document.getElementById('tabQuotation').classList.add('active');
+        document.getElementById('tabPI').classList.remove('active');
+        currentTab = 'quotation';
+        document.getElementById('qSection').style.display = 'block';
+        document.getElementById('piSection').style.display = 'none';
+      }
       buildQuotation();
     } else {
       document.getElementById('qSection').style.display = 'none';
+      document.getElementById('piSection').style.display = 'none';
+      document.getElementById('tabBar').style.display = 'none';
       document.getElementById('mixBatchRow').style.display = 'none';
-      renderSKUList();
+      document.getElementById('tabQuotation').classList.remove('active');
+      document.getElementById('tabPI').classList.remove('active');
+      currentTab = null;
+      // renderSKUList(); // 已隐藏
     }
   }, 500);
 });
 
 // 统一数量/汇率等参数变化时自动重新报价
-['uniQty','exRate','validity','delivery','payment'].forEach(function(id) {
-  document.getElementById(id).addEventListener('input', function() {
-    // uniQty 变化时清空混批
-    if (id === 'uniQty') {
-      document.getElementById('mixTotal').value = '';
-    }
-    clearTimeout(_debounceTimer);
-    _debounceTimer = setTimeout(function() {
-      if (document.getElementById('skuInput').value.trim()) {
-        buildQuotation();
+['uniQty','exRate','validity','delivery','payment','buyerName','buyerAddr','buyerTel','buyerFax'].forEach(function(id) {
+  ['input','change'].forEach(function(evt) {
+    document.getElementById(id).addEventListener(evt, function() {
+      // uniQty 变化时清空混批
+      if (id === 'uniQty') {
+        document.getElementById('mixTotal').value = '';
       }
-    }, 400);
+      clearTimeout(_debounceTimer);
+      _debounceTimer = setTimeout(function() {
+        if (document.getElementById('skuInput').value.trim()) {
+          buildQuotation();
+        }
+      }, 400);
+    });
   });
 });
 
